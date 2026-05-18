@@ -1,1 +1,9 @@
-manim
+# Base notebook runtime dependencies are standard-library only.
+# Optional extras are listed below when needed for authoring workflows.
+# Install Manim separately after installing the system packages it needs on Linux:
+#   sudo apt-get install libcairo2-dev libpango1.0-dev ffmpeg pkg-config
+#   pip install manim
+
+# Slideshow support in JupyterLab/Notebook
+jupyterlab-rise==0.43.1
+rise==5.7.1
