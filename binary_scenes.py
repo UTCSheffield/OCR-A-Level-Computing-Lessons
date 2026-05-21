@@ -237,6 +237,10 @@ class BinaryAdditionScene(Scene):
 
         # Compute addition column by column, right to left.
         carry = 0
+        carry_overflow_box = None
+        carry_overflow_bit = None
+        answer_overflow_box = None
+        answer_overflow_bit = None
         for col_index in range(self.bits - 1, -1, -1):
             incoming_carry = carry
 
@@ -266,21 +270,63 @@ class BinaryAdditionScene(Scene):
             self.play(Create(col_box), run_time=0.25)
             self.wait(0.15)
 
-            # Display result and carry together so the column update happens simultaneously.
+            # Display result and carry together from the highlighted column into their cells.
             result_target = rows[3][3][col_index][1]
             result_cell_box = rows[3][3][col_index][0]
             result_text = maths_text(str(result_bit), font_size=BIT_FONT_SIZE)
-            result_text.move_to(result_cell_box)
+            result_start = rows[0][3][col_index][0].get_center()
+            result_text.move_to(result_start)
 
-            reveal_anims = [Transform(result_target, result_text)]
+            reveal_anims = [result_text.animate.move_to(result_cell_box)]
+            staged_updates = [(result_target, result_text)]
             if carry_out > 0 and col_index > 0:
                 carry_target = rows[2][3][col_index - 1][1]
                 carry_cell_box = rows[2][3][col_index - 1][0]
                 carry_text = maths_text("1", font_size=BIT_FONT_SIZE)
-                carry_text.move_to(carry_cell_box)
-                reveal_anims.append(Transform(carry_target, carry_text))
+                carry_start = rows[1][3][col_index][0].get_center()
+                carry_text.move_to(carry_start)
+                reveal_anims.append(carry_text.animate.move_to(carry_cell_box))
+                staged_updates.append((carry_target, carry_text))
 
+            # Final-column overflow uses the same reveal style/timing as normal bits.
+            if carry_out > 0 and col_index == 0:
+                carry_overflow_box = RoundedRectangle(corner_radius=0.08, width=0.44, height=0.44, stroke_width=2)
+                carry_overflow_box.next_to(rows[2][3][0][0], LEFT, buff=0.07)
+                carry_overflow_box.align_to(rows[2][3][0][0], UP)
+                carry_overflow_box.set_stroke(color=WHITE, opacity=0.75, width=2)
+                carry_overflow_box.set_fill(BLACK, opacity=0)
+
+                answer_overflow_box = RoundedRectangle(corner_radius=0.08, width=0.44, height=0.44, stroke_width=2)
+                answer_overflow_box.next_to(rows[3][3][0][0], LEFT, buff=0.07)
+                answer_overflow_box.match_x(carry_overflow_box)
+                answer_overflow_box.align_to(rows[3][3][0][0], UP)
+                answer_overflow_box.set_stroke(color=WHITE, opacity=0.75, width=2)
+                answer_overflow_box.set_fill(BLACK, opacity=0)
+
+                carry_overflow_bit = maths_text("1", font_size=BIT_FONT_SIZE)
+                answer_overflow_bit = maths_text("1", font_size=BIT_FONT_SIZE)
+                carry_overflow_bit.move_to(rows[1][3][0][0].get_center())
+                answer_overflow_bit.move_to(rows[0][3][0][0].get_center())
+
+                reveal_anims.extend(
+                    [
+                        FadeIn(carry_overflow_box),
+                        FadeIn(answer_overflow_box),
+                        carry_overflow_bit.animate.move_to(carry_overflow_box),
+                        answer_overflow_bit.animate.move_to(answer_overflow_box),
+                    ]
+                )
+
+            self.add(result_text)
+            if carry_out > 0 and col_index > 0:
+                self.add(carry_text)
+            if carry_out > 0 and col_index == 0:
+                self.add(carry_overflow_bit, answer_overflow_bit)
             self.play(*reveal_anims, run_time=0.2)
+
+            for target, rendered in staged_updates:
+                target.become(rendered)
+                self.remove(rendered)
 
             self.play(FadeOut(col_box), run_time=0.15)
             self.wait(0.1)
@@ -289,34 +335,13 @@ class BinaryAdditionScene(Scene):
         answer_bits = VGroup(*[rows[3][3][i][1] for i in range(self.bits)])
         self.play(*[bit.animate.set_color(GREEN) for bit in answer_bits], run_time=0.35)
 
-        # Show overflow carry in carry row, then mark overflow answer bit as discarded.
-        carry_overflow_bit = None
-        carry_overflow_box = None
-        overflow_bit = None
-        overflow_box = None
-        if carry > 0:
-            carry_overflow_bit = maths_text("1", font_size=BIT_FONT_SIZE, color=RED)
-            carry_overflow_box = RoundedRectangle(corner_radius=0.08, width=0.44, height=0.44, stroke_width=2)
-            carry_overflow_box.next_to(rows[2][3][0][0], LEFT, buff=0.07)
-            carry_overflow_box.align_to(rows[2][3][0][0], UP)
-            carry_overflow_box.set_stroke(color=RED, opacity=0.9, width=2.5)
-            carry_overflow_box.set_fill(BLACK, opacity=0)
-            carry_overflow_bit.move_to(carry_overflow_box)
-
-            overflow_bit = maths_text("1", font_size=BIT_FONT_SIZE, color=RED)
-            overflow_box = RoundedRectangle(corner_radius=0.08, width=0.44, height=0.44, stroke_width=2)
-            overflow_box.move_to(rows[3][2][0])
-            overflow_box.match_x(carry_overflow_box)
-            overflow_box.align_to(rows[3][3][0][0], UP)
-            overflow_box.set_stroke(color=RED, opacity=0.9, width=2.5)
-            overflow_box.set_fill(BLACK, opacity=0)
-            overflow_bit.move_to(overflow_box)
-            # Match normal bit-reveal timing: overflow carry and overflow answer appear together.
+        # Color overflow artifacts red after reveal to indicate discarded overflow from the answer.
+        if carry_overflow_box is not None and answer_overflow_box is not None:
             self.play(
-                FadeIn(carry_overflow_box),
-                FadeIn(carry_overflow_bit),
-                FadeIn(overflow_box),
-                FadeIn(overflow_bit),
+                carry_overflow_box.animate.set_stroke(color=RED, opacity=0.9, width=2.5),
+                answer_overflow_box.animate.set_stroke(color=RED, opacity=0.9, width=2.5),
+                carry_overflow_bit.animate.set_color(RED),
+                answer_overflow_bit.animate.set_color(RED),
                 run_time=0.2,
             )
 
