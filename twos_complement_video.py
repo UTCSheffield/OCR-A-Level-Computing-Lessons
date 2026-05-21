@@ -12,7 +12,7 @@ class TwosComplementVideo(TwosComplementScene):
 
 def main() -> None:
     parser = ArgumentParser(description="Render a two's complement example video")
-    parser.add_argument("--value", type=int, default=43)
+    parser.add_argument("--value", type=int, default=42)
     parser.add_argument("--bits", type=int, default=8)
     args = parser.parse_args()
 

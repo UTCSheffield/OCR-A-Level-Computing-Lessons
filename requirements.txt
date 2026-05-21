@@ -7,3 +7,6 @@
 # Slideshow support in JupyterLab/Notebook
 jupyterlab-rise==0.43.1
 rise==5.7.1
+
+# Test runner
+pytest==8.3.5

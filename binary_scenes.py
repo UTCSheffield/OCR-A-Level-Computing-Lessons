@@ -24,6 +24,18 @@ class BinaryField:
     bits: str
 
 
+@dataclass(frozen=True)
+class FloatingPointComponents:
+    fixed_value: str
+    fixed_bits: str
+    fixed_value_numeric: float
+    mantissa_bits: str
+    exponent_value: int
+    exponent_bits: str
+    floating_value: float
+    precision_loss: float
+
+
 def _bit_group(bits: str) -> VGroup:
     cells = VGroup()
     for bit in bits:
@@ -50,6 +62,69 @@ def _align_rows(rows: VGroup) -> None:
 
 def _binary_bits(value: int, bits: int) -> str:
     return format(value & ((1 << bits) - 1), f"0{bits}b")
+
+
+def _twos_complement_bits(value: int, bits: int) -> str:
+    return _binary_bits((1 << bits) - value, bits)
+
+
+def _fixed_from_denary_value(denary_value: float, integer_bits: int, fraction_bits: int) -> tuple[str, str]:
+    if denary_value < 0:
+        raise ValueError("Fixed-point conversion currently supports non-negative denary inputs only")
+
+    total_bits = integer_bits + fraction_bits
+    scale = 1 << fraction_bits
+    scaled = int(round(denary_value * scale))
+    max_scaled = (1 << total_bits) - 1
+    if scaled > max_scaled:
+        raise ValueError(
+            f"Denary value {denary_value:g} does not fit in {integer_bits}.{fraction_bits} fixed-point bits"
+        )
+
+    fixed_bits = format(scaled, f"0{total_bits}b")
+    fixed_value = f"{fixed_bits[:integer_bits]}.{fixed_bits[integer_bits:]}"
+    return fixed_value, fixed_bits
+
+
+def _floating_point_components(
+    denary_value: float,
+    integer_bits: int,
+    fraction_bits: int,
+    mantissa_bits: int,
+    exponent_bits: int,
+    exponent: int | None = None,
+) -> FloatingPointComponents:
+    fixed_value, fixed_bits = _fixed_from_denary_value(denary_value, integer_bits, fraction_bits)
+    first_one_index = fixed_bits.find("1")
+    if first_one_index == -1:
+        auto_exponent = 0
+        mantissa_source = "0" * mantissa_bits
+    else:
+        auto_exponent = integer_bits - first_one_index
+        mantissa_source = "0" + fixed_bits[first_one_index:] + ("0" * mantissa_bits)
+
+    mantissa = mantissa_source[:mantissa_bits]
+    exponent_value = exponent if exponent is not None else auto_exponent
+    exponent_value_bits = format(exponent_value & ((1 << exponent_bits) - 1), f"0{exponent_bits}b")
+    fixed_value_numeric = int(fixed_bits, 2) / float(1 << fraction_bits)
+
+    sign = -1.0 if mantissa[0] == "1" else 1.0
+    mantissa_fraction = 0.0
+    for bit_index, bit in enumerate(mantissa[1:], start=1):
+        if bit == "1":
+            mantissa_fraction += 2 ** (-bit_index)
+    floating_value = sign * mantissa_fraction * (2**exponent_value)
+
+    return FloatingPointComponents(
+        fixed_value=fixed_value,
+        fixed_bits=fixed_bits,
+        fixed_value_numeric=fixed_value_numeric,
+        mantissa_bits=mantissa,
+        exponent_value=exponent_value,
+        exponent_bits=exponent_value_bits,
+        floating_value=floating_value,
+        precision_loss=denary_value - floating_value,
+    )
 
 
 def rename_rendered_video(scene_name: str, output_name: str) -> Path:
@@ -370,65 +445,372 @@ class TwosComplementScene(Scene):
         flipped = "".join("1" if bit == "0" else "0" for bit in positive)
         negative = _binary_bits((1 << self.bits) - self.value, self.bits)
 
+        plus_one_bits = "0" * (self.bits - 1) + "1"
         rows = VGroup(
             _standard_row(f"+{self.value}", "=", "", positive),
-            _standard_row("Flip", "→", "", flipped),
-            _standard_row("Add 1", "+", "1", negative),
+            _standard_row("Flip bits", "→", "", " " * self.bits),
+            _standard_row("+1", "+", "", plus_one_bits),
+            _standard_row("Carry", "", "", " " * self.bits),
+            _standard_row(f"-{self.value}", "=", "", " " * self.bits),
         ).arrange(DOWN, buff=ROW_GAP, aligned_edge=LEFT)
         rows.next_to(subtitle, DOWN, buff=0.6).to_edge(LEFT, buff=0.65)
         _align_rows(rows)
 
         self.play(FadeIn(rows[0], shift=UP * 0.1))
-        self.play(FadeIn(rows[1], shift=UP * 0.1))
-        for index in range(self.bits):
-            box = SurroundingRectangle(rows[1][3][index], color=BLUE, buff=0.03)
-            self.play(Create(box), run_time=0.14)
-            self.play(FadeOut(box), run_time=0.08)
 
-        self.play(FadeIn(rows[2], shift=UP * 0.1))
-        plus_one_box = SurroundingRectangle(rows[2][3][0], color=YELLOW, buff=0.03)
-        self.play(Create(plus_one_box), run_time=0.25)
-        self.wait(1)
+        # Step 1: Flip each bit one by one into the next row.
+        self.play(FadeIn(rows[1], shift=UP * 0.1))
+        x_left = rows[0][3].get_left()[0] - 0.05
+        x_right = rows[0][3].get_right()[0] + 0.05
+        flip_line_y = rows[0].get_bottom()[1] - 0.12
+        flip_line = Line([x_left, flip_line_y, 0], [x_right, flip_line_y, 0], color=GREY_B, stroke_width=2)
+        self.play(Create(flip_line), run_time=0.3)
+
+        for index in range(self.bits - 1, -1, -1):
+            src_box = rows[0][3][index][0]
+            dst_box = rows[1][3][index][0]
+            src_bit = rows[0][3][index][1]
+            dst_target = rows[1][3][index][1]
+
+            travelling = src_bit.copy().move_to(src_box)
+            flipped_text = maths_text(flipped[index], font_size=BIT_FONT_SIZE).move_to(dst_box)
+            self.add(travelling)
+            self.play(
+                travelling.animate.move_to(dst_box).stretch(0.15, 0),
+                run_time=0.12,
+            )
+            self.remove(travelling)
+            self.play(Transform(dst_target, flipped_text), run_time=0.08)
+
+        self.wait(0.15)
+
+        # Step 2: Add +1 to the flipped bits using the same column rhythm as addition.
+        self.play(FadeIn(rows[2], shift=UP * 0.1), FadeIn(rows[3], shift=UP * 0.1), FadeIn(rows[4], shift=UP * 0.1))
+
+        result_line_y = rows[3].get_bottom()[1] - 0.12
+        result_line = Line([x_left, result_line_y, 0], [x_right, result_line_y, 0], color=WHITE, stroke_width=2)
+        self.play(Create(result_line), run_time=0.3)
+
+        carry = 0
+        for col_index in range(self.bits - 1, -1, -1):
+            incoming_carry = carry
+            bit_a = int(flipped[col_index])
+            bit_b = int(plus_one_bits[col_index])
+
+            col_sum = bit_a + bit_b + incoming_carry
+            result_bit = col_sum % 2
+            carry_out = col_sum // 2
+            carry = carry_out
+
+            col_cells = [rows[1][3][col_index], rows[2][3][col_index]]
+            if incoming_carry > 0 or col_index < self.bits - 1:
+                col_cells.append(rows[3][3][col_index])
+
+            col_group = VGroup(*col_cells)
+            col_box = Rectangle(
+                width=rows[1][3][col_index].width + 0.14,
+                height=col_group.height + 0.14,
+                color=BLUE,
+                stroke_width=4,
+            )
+            col_box.move_to(col_group)
+            self.play(Create(col_box), run_time=0.2)
+
+            result_target = rows[4][3][col_index][1]
+            result_cell_box = rows[4][3][col_index][0]
+            result_text = maths_text(str(result_bit), font_size=BIT_FONT_SIZE)
+            result_text.move_to(result_cell_box)
+
+            reveal_anims = [Transform(result_target, result_text)]
+            if carry_out > 0 and col_index > 0:
+                carry_target = rows[3][3][col_index - 1][1]
+                carry_cell_box = rows[3][3][col_index - 1][0]
+                carry_text = maths_text("1", font_size=BIT_FONT_SIZE)
+                carry_text.move_to(carry_cell_box)
+                reveal_anims.append(Transform(carry_target, carry_text))
+
+            self.play(*reveal_anims, run_time=0.2)
+            self.play(FadeOut(col_box), run_time=0.12)
+
+        result_bits = VGroup(*[rows[4][3][i][1] for i in range(self.bits)])
+        self.play(*[bit.animate.set_color(GREEN) for bit in result_bits], run_time=0.3)
+        self.wait(1.0)
 
 
 class FixedToFloatingScene(Scene):
-    def __init__(self, fixed_value: str = "1101.0000", exponent: int = 4, exponent_bits: int = 4, **kwargs):
+    def __init__(
+        self,
+        denary_value: float = 12.25,
+        integer_bits: int = 4,
+        fraction_bits: int = 4,
+        mantissa_bits: int = 8,
+        exponent: int | None = None,
+        exponent_bits: int = 4,
+        detailed_conversion: bool = False,
+        show_headers: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.fixed_value = fixed_value
+        self.denary_value = denary_value
+        self.integer_bits = integer_bits
+        self.fraction_bits = fraction_bits
+        self.mantissa_bits = mantissa_bits
         self.exponent = exponent
         self.exponent_bits = exponent_bits
+        self.detailed_conversion = detailed_conversion
+        self.show_headers = show_headers
+
+    def _fixed_from_denary(self) -> tuple[str, str]:
+        return _fixed_from_denary_value(self.denary_value, self.integer_bits, self.fraction_bits)
+
+    def _animate_denary_to_fixed_breakdown(
+        self,
+        value: float,
+        bits: str,
+        bit_cells: VGroup,
+        point_after: int,
+        color=YELLOW,
+    ) -> None:
+        """Animate denary to fixed-binary conversion by sweeping across bit cells."""
+        remaining = value
+        tracker = maths_text(f"{remaining:g}", font_size=BIT_FONT_SIZE, color=color)
+        tracker.move_to(bit_cells[0][0].get_center() + UP * 0.33)
+
+        self.play(FadeIn(tracker), run_time=0.2)
+
+        for col_index in range(len(bits)):
+            target = bit_cells[col_index][0].get_center() + UP * 0.33
+            self.play(
+                tracker.animate.move_to(target),
+                bit_cells[col_index][1].animate.set_opacity(1.0),
+                run_time=0.18,
+            )
+
+            if bits[col_index] == "1":
+                power = point_after - col_index
+                column_value = 2**power
+                remaining -= column_value
+                updated = maths_text(f"{remaining:g}", font_size=BIT_FONT_SIZE, color=color)
+                updated.move_to(tracker)
+                self.play(Transform(tracker, updated), run_time=0.12)
+
+        self.play(FadeOut(tracker), run_time=0.2)
 
     def construct(self):
         title = Text("Fixed to Floating Point", font_size=40).to_edge(UP)
-        subtitle = Text("Normalise one step at a time", font_size=28, color=BLUE)
+        subtitle = Text(f"{self.denary_value:g}", font_size=28, color=BLUE)
         subtitle.next_to(title, DOWN, buff=0.35)
         self.play(Write(title), FadeIn(subtitle, shift=UP * 0.1))
 
-        fixed_bits = self.fixed_value.replace(".", "")
-        point_after = self.fixed_value.index(".") - 1
-        normalised = fixed_bits[0] + fixed_bits[1:]
-        exponent_bits = format(self.exponent & ((1 << self.exponent_bits) - 1), f"0{self.exponent_bits}b")
+        components = _floating_point_components(
+            self.denary_value,
+            self.integer_bits,
+            self.fraction_bits,
+            self.mantissa_bits,
+            self.exponent_bits,
+            self.exponent,
+        )
+        fixed_value = components.fixed_value
+        fixed_bits = components.fixed_bits
+        fixed_point_after = self.integer_bits - 1
+
+        mantissa_bits = components.mantissa_bits
+        exponent_value = components.exponent_value
+        initial_point_after = min(exponent_value, self.mantissa_bits - 1)
+        shifts_needed = initial_point_after
+        exponent_bits = components.exponent_bits
+        fixed_represented_value = components.fixed_value_numeric
+        floating_represented_value = components.floating_value
+        precision_loss = components.precision_loss
 
         rows = VGroup(
-            _standard_row("Fixed", "=", "", fixed_bits),
-            _standard_row("Mantissa", "→", "", normalised, point_after=point_after),
-            _standard_row("Exponent", "=", "", "", exponent_bits),
+            _standard_row("Fixed", "=", "", " " * len(fixed_bits), point_after=fixed_point_after),
+            _standard_row("Floating point", "=", "", " " * len(mantissa_bits), " " * self.exponent_bits, point_after=initial_point_after),
         ).arrange(DOWN, buff=ROW_GAP, aligned_edge=LEFT)
         rows.next_to(subtitle, DOWN, buff=0.6).to_edge(LEFT, buff=0.65)
         _align_rows(rows)
 
-        self.play(FadeIn(rows[0], shift=UP * 0.1))
-        shift_note = Text("Move the binary point until the leading 1 is just left of it", font_size=24, color=YELLOW)
-        shift_note.next_to(rows[0], DOWN, buff=0.25)
-        self.play(FadeIn(shift_note, shift=UP * 0.1))
+        # Prepare fixed-row bit glyphs but keep them hidden until conversion animation reveals them.
+        for col_index, bit in enumerate(fixed_bits):
+            bit_text = maths_text(bit, font_size=BIT_FONT_SIZE)
+            bit_text.move_to(rows[0][3][col_index][0])
+            rows[0][3][col_index][1].become(bit_text)
+            rows[0][3][col_index][1].set_opacity(0)
 
-        self.play(FadeIn(rows[1], shift=UP * 0.1), FadeIn(rows[2], shift=UP * 0.1))
+        if self.show_headers:
+            denary_headers = VGroup()
+            for col_index in range(len(fixed_bits)):
+                power = fixed_point_after - col_index
+                if power >= 0:
+                    label = str(1 << power)
+                else:
+                    label = f"1/{1 << (-power)}"
+                header = Text(label, font_size=16, color=GREY_B)
+                header.next_to(rows[0][3][col_index][0], UP, buff=0.08)
+                denary_headers.add(header)
+            self.play(FadeIn(denary_headers, shift=UP * 0.08), run_time=0.35)
 
-        for index in range(len(normalised)):
-            box = SurroundingRectangle(rows[1][3][index], color=GREEN, buff=0.03)
-            self.play(Create(box), run_time=0.12)
-            self.play(FadeOut(box), run_time=0.08)
+        step_1 = Text("Step 1: Convert denary to fixed binary", font_size=20, color=YELLOW)
+        step_1.next_to(rows, LEFT, buff=0.65).align_to(rows[0], UP)
+        self.play(FadeIn(step_1, shift=RIGHT * 0.1), run_time=0.25)
 
-        exponent_box = SurroundingRectangle(rows[2][4], color=BLUE, buff=0.06)
-        self.play(Create(exponent_box), run_time=0.25)
-        self.wait(1)
+        self.play(FadeIn(rows[0], shift=UP * 0.1), FadeIn(rows[1], shift=UP * 0.1))
+
+        if self.detailed_conversion:
+            self._animate_denary_to_fixed_breakdown(
+                self.denary_value,
+                fixed_bits,
+                rows[0][3],
+                fixed_point_after,
+                color=YELLOW,
+            )
+        else:
+            denary_number = maths_text(f"{self.denary_value:g}", font_size=BIT_FONT_SIZE, color=YELLOW)
+            denary_number.move_to(rows[0][3])
+            target_bits = rows[0][3].copy()
+            for col_index, bit in enumerate(fixed_bits):
+                bit_text = maths_text(bit, font_size=BIT_FONT_SIZE)
+                bit_text.move_to(target_bits[col_index][0])
+                target_bits[col_index][1].become(bit_text)
+                target_bits[col_index][1].set_opacity(1.0)
+            self.play(FadeIn(denary_number, shift=UP * 0.1), run_time=0.25)
+            self.play(Transform(denary_number, target_bits), run_time=1.0)
+            for col_index in range(len(fixed_bits)):
+                rows[0][3][col_index][1].set_opacity(1.0)
+            self.remove(denary_number)
+
+        step_2 = Text("Step 2: Shift point left to normalise", font_size=20, color=YELLOW)
+        step_2.next_to(rows, LEFT, buff=0.65).align_to(rows[1], UP)
+        self.play(Transform(step_1, step_2), run_time=0.3)
+
+        move_count = 0
+        move_counter = Text("Moves: 0", font_size=19, color=YELLOW)
+        move_counter.next_to(step_1, DOWN, buff=0.12).align_to(step_1, LEFT)
+        display_point_after = initial_point_after
+        point_display = Text(
+            f"{mantissa_bits[:display_point_after+1]}.{mantissa_bits[display_point_after+1:]}",
+            font_size=18,
+            color=YELLOW,
+        )
+        point_display.next_to(move_counter, DOWN, buff=0.08).align_to(move_counter, LEFT)
+        self.play(FadeIn(move_counter, shift=UP * 0.05), FadeIn(point_display, shift=UP * 0.05), run_time=0.2)
+
+        top_line_y = rows[0].get_bottom()[1] - 0.12
+        x_left = rows[0][3].get_left()[0] - 0.05
+        x_right = rows[0][3].get_right()[0] + 0.05
+        top_line = Line([x_left, top_line_y, 0], [x_right, top_line_y, 0], color=GREY_B, stroke_width=2)
+        self.play(Create(top_line), run_time=0.25)
+
+        first_one_index = fixed_bits.find("1")
+        sign_target = rows[1][3][0][1]
+        sign_text = maths_text(mantissa_bits[0], font_size=BIT_FONT_SIZE).move_to(rows[1][3][0][0])
+        self.play(Transform(sign_target, sign_text), run_time=0.08)
+
+        for target_index in range(1, len(mantissa_bits)):
+            source_index = first_one_index + target_index - 1 if first_one_index != -1 else -1
+            target = rows[1][3][target_index][1]
+            target_text = maths_text(mantissa_bits[target_index], font_size=BIT_FONT_SIZE).move_to(rows[1][3][target_index][0])
+
+            if 0 <= source_index < len(fixed_bits):
+                travelling_cell = rows[0][3][source_index].copy()
+                travelling_cell.move_to(rows[0][3][source_index][0])
+                self.add(travelling_cell)
+                self.play(travelling_cell.animate.move_to(rows[1][3][target_index][0]), run_time=0.12)
+                self.remove(travelling_cell)
+
+            self.play(Transform(target, target_text), run_time=0.06)
+
+        point_marker = rows[1].point_marker
+        for step in range(shifts_needed):
+            src_index = initial_point_after - step
+            dst_index = src_index - 1
+            shift_box = SurroundingRectangle(VGroup(rows[1][3][dst_index], rows[1][3][src_index]), color=BLUE, buff=0.03)
+            self.play(Create(shift_box), run_time=0.14)
+
+            target_pos = point_marker.copy()
+            target_pos.next_to(rows[1][3][dst_index], RIGHT, buff=0.03)
+            target_pos.align_to(rows[1][3][dst_index], DOWN)
+            move_count += 1
+            display_point_after = max(0, display_point_after - 1)
+            updated_counter = Text(f"Moves: {move_count}", font_size=19, color=YELLOW)
+            updated_counter.move_to(move_counter)
+            updated_point_display = Text(
+                f"{mantissa_bits[:display_point_after+1]}.{mantissa_bits[display_point_after+1:]}",
+                font_size=18,
+                color=YELLOW,
+            )
+            updated_point_display.move_to(point_display)
+            self.play(
+                point_marker.animate.move_to(target_pos),
+                Transform(move_counter, updated_counter),
+                Transform(point_display, updated_point_display),
+                run_time=0.16,
+            )
+            self.play(FadeOut(shift_box), run_time=0.08)
+
+        step_3 = Text("Step 3: Convert move count to exponent", font_size=20, color=YELLOW)
+        step_3.next_to(rows, LEFT, buff=0.65).align_to(rows[1], UP)
+        self.play(Transform(step_1, step_3), run_time=0.25)
+
+        decimal_to_binary = Text(f"{move_count} -> {exponent_bits}", font_size=19, color=YELLOW)
+        decimal_to_binary.next_to(rows[1][4], UP, buff=0.1)
+        self.play(Transform(move_counter, decimal_to_binary), FadeOut(point_display), run_time=0.25)
+
+        mantissa_label = Text("Mantissa", font_size=18, color=GREY_B)
+        exponent_label = Text("Exponent", font_size=18, color=GREY_B)
+        mantissa_label.next_to(rows[1][3], DOWN, buff=0.08)
+        exponent_label.next_to(rows[1][4], DOWN, buff=0.08)
+        self.play(FadeIn(mantissa_label, shift=UP * 0.05), FadeIn(exponent_label, shift=UP * 0.05), run_time=0.2)
+
+        # Reveal exponent bits in-place after normalization.
+        exponent_cells = rows[1][4]
+        exp_reveals = []
+        for idx, bit in enumerate(exponent_bits):
+            target = exponent_cells[idx][1]
+            target_text = maths_text(bit, font_size=BIT_FONT_SIZE).move_to(exponent_cells[idx][0])
+            exp_reveals.append(Transform(target, target_text))
+        self.play(*exp_reveals, run_time=0.35)
+        self.play(FadeOut(move_counter), run_time=0.2)
+
+        mantissa_bit_glyphs = VGroup(*[rows[1][3][i][1] for i in range(len(mantissa_bits))])
+        self.play(*[bit.animate.set_color(GREEN) for bit in mantissa_bit_glyphs], run_time=0.25)
+
+        step_4 = Text("Step 4: Convert floating point back to denary", font_size=20, color=YELLOW)
+        step_4.next_to(rows, LEFT, buff=0.65).align_to(rows[1], UP)
+        self.play(Transform(step_1, step_4), run_time=0.25)
+
+        mantissa_display = f"{mantissa_bits[0]}.{mantissa_bits[1:]}"
+        floating_text = Text(
+            f"Floating: {mantissa_display}  {exponent_bits} (exp = {exponent_value})",
+            font_size=22,
+            color=BLUE,
+        )
+        floating_text.next_to(rows, DOWN, buff=0.55).align_to(rows, LEFT)
+
+        fixed_text = Text(
+            f"Fixed value: {fixed_value} = {fixed_represented_value:g}",
+            font_size=22,
+            color=GREY_B,
+        )
+        fixed_text.next_to(floating_text, DOWN, buff=0.15).align_to(floating_text, LEFT)
+
+        round_trip_text = Text(
+            f"Floating round trip: {self.denary_value:g} -> {floating_represented_value:g}",
+            font_size=24,
+            color=GREEN,
+        )
+        round_trip_text.next_to(fixed_text, DOWN, buff=0.15).align_to(floating_text, LEFT)
+
+        loss_text = Text(
+            f"Precision loss: {abs(precision_loss):g}",
+            font_size=22,
+            color=RED if abs(precision_loss) > 0 else GREEN,
+        )
+        loss_text.next_to(round_trip_text, DOWN, buff=0.15).align_to(round_trip_text, LEFT)
+
+        self.play(FadeIn(floating_text, shift=UP * 0.06), run_time=0.25)
+        self.play(FadeIn(fixed_text, shift=UP * 0.06), run_time=0.25)
+        self.play(FadeIn(round_trip_text, shift=UP * 0.06), run_time=0.25)
+        self.play(FadeIn(loss_text, shift=UP * 0.06), run_time=0.25)
+        self.play(FadeOut(step_1), run_time=0.2)
+        self.wait(1.0)
